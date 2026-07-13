@@ -73,7 +73,8 @@
     font-size: 12px;
   }
   select { min-width: 110px; }
-  #searchBox { width: 160px; }
+  #templateSelect { min-width: 180px; max-width: 260px; }
+  #searchBox { width: 140px; }
   .flags label {
     color: #ccc;
     margin-right: 4px;
@@ -99,6 +100,18 @@
   }
   button.connect:hover { background: #1a9d70; }
   .spacer { flex: 1; }
+  #preview {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    color: #ce9178;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 6px 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   #tableWrap {
     flex: 1;
     overflow: auto;
@@ -120,6 +133,13 @@
     color: #ccc;
     font-weight: 600;
   }
+  thead th.check,
+  tbody td.check {
+    width: 36px;
+    text-align: center;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
   tbody td {
     padding: 7px 12px;
     border-bottom: 1px solid #2a2a2a;
@@ -129,7 +149,7 @@
   tbody tr.selected { background: #094771; }
   tbody tr.selected:hover { background: #0a5a8a; }
   #log {
-    height: 72px;
+    height: 90px;
     overflow: auto;
     background: #111;
     border: 1px solid #333;
@@ -148,29 +168,33 @@
 <script language="JScript">
 var g_baseDir = "";
 var g_pcs = [];
-var g_selected = -1;
+var g_templates = [];
+var g_checked = {};
+var g_focusIdx = -1;
 var g_config = { path: "", username: "", password: "" };
 
 function onLoad() {
   try {
-    window.resizeTo(820, 560);
+    window.resizeTo(920, 620);
     window.moveTo(
-      Math.max(0, (screen.availWidth - 820) / 2),
-      Math.max(0, (screen.availHeight - 560) / 2)
+      Math.max(0, (screen.availWidth - 920) / 2),
+      Math.max(0, (screen.availHeight - 620) / 2)
     );
   } catch (e) {}
 
   g_baseDir = getBaseDir();
   document.getElementById("configPath").innerText = g_baseDir;
   loadConfig();
+  loadTemplates();
   loadPcs();
+  renderTemplates();
   renderTable();
+  updatePreview();
   log("Ready. Config: " + g_baseDir + "config.ini", "ok");
 }
 
 function getBaseDir() {
   var path = unescape(location.pathname);
-  // HTA paths often look like /C:/folder/file.hta
   if (path.charAt(0) === "/") path = path.substring(1);
   path = path.replace(/\//g, "\\");
   var i = path.lastIndexOf("\\");
@@ -215,8 +239,10 @@ function loadConfig() {
 function loadPcs() {
   var fso = new ActiveXObject("Scripting.FileSystemObject");
   var csvPath = g_baseDir + "pcs.csv";
+  var prevChecked = g_checked;
   g_pcs = [];
-  g_selected = -1;
+  g_checked = {};
+  g_focusIdx = -1;
 
   if (!fso.FileExists(csvPath)) {
     log("pcs.csv not found: " + csvPath, "err");
@@ -229,17 +255,54 @@ function loadPcs() {
     var line = ts.ReadLine();
     if (first) {
       first = false;
-      continue; // header
+      continue;
     }
     line = trim(line);
     if (!line) continue;
     var parts = parseCsvLine(line);
     var name = trim(parts[0] || "");
     var notes = trim(parts[1] || "");
-    if (name) g_pcs.push({ name: name, notes: notes });
+    if (name) {
+      g_pcs.push({ name: name, notes: notes });
+      if (prevChecked[name]) g_checked[name] = true;
+    }
   }
   ts.Close();
   log("Loaded " + g_pcs.length + " PC(s) from pcs.csv", "ok");
+}
+
+function loadTemplates() {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var csvPath = g_baseDir + "templates.csv";
+  g_templates = [];
+
+  if (!fso.FileExists(csvPath)) {
+    g_templates.push({ name: "Interactive shell", command: "" });
+    log("templates.csv not found; using Interactive shell only", "err");
+    return;
+  }
+
+  var ts = fso.OpenTextFile(csvPath, 1);
+  var first = true;
+  while (!ts.AtEndOfStream) {
+    var line = ts.ReadLine();
+    if (first) {
+      first = false;
+      continue;
+    }
+    line = trim(line);
+    if (!line) continue;
+    var parts = parseCsvLine(line);
+    var name = trim(parts[0] || "");
+    var command = trim(parts[1] || "");
+    if (name) g_templates.push({ name: name, command: command });
+  }
+  ts.Close();
+
+  if (g_templates.length === 0) {
+    g_templates.push({ name: "Interactive shell", command: "" });
+  }
+  log("Loaded " + g_templates.length + " template(s)", "ok");
 }
 
 function parseCsvLine(line) {
@@ -294,32 +357,80 @@ function filteredPcs() {
   return out;
 }
 
+function renderTemplates() {
+  var sel = document.getElementById("templateSelect");
+  var prev = sel.value;
+  sel.innerHTML = "";
+  for (var i = 0; i < g_templates.length; i++) {
+    var opt = document.createElement("option");
+    opt.value = String(i);
+    opt.innerText = g_templates[i].name;
+    sel.appendChild(opt);
+  }
+  if (prev !== "" && parseInt(prev, 10) < g_templates.length) {
+    sel.value = prev;
+  } else {
+    sel.selectedIndex = 0;
+  }
+}
+
+function getSelectedTemplate() {
+  var idx = parseInt(document.getElementById("templateSelect").value, 10);
+  if (isNaN(idx) || idx < 0 || idx >= g_templates.length) {
+    return { name: "Interactive shell", command: "" };
+  }
+  return g_templates[idx];
+}
+
+function updatePreview() {
+  var t = getSelectedTemplate();
+  var shell = document.getElementById("shellType").value;
+  var remote = buildRemotePayload(shell, t.command);
+  var el = document.getElementById("preview");
+  if (!t.command) {
+    el.innerText = "Remote: interactive " + (shell === "powershell" ? "PowerShell" : "CMD");
+  } else {
+    el.innerText = "Remote: " + remote;
+  }
+  el.title = el.innerText;
+}
+
 function renderTable() {
   var tbody = document.getElementById("pcBody");
   tbody.innerHTML = "";
   var list = filteredPcs();
-  var selName = (g_selected >= 0 && g_selected < g_pcs.length) ? g_pcs[g_selected].name : "";
+  var focusName = (g_focusIdx >= 0 && g_focusIdx < g_pcs.length) ? g_pcs[g_focusIdx].name : "";
 
   for (var i = 0; i < list.length; i++) {
     var p = list[i];
-    var tr = document.createElement("tr");
     var realIdx = indexOfPc(p.name);
-    if (p.name === selName) {
-      tr.className = "selected";
-      g_selected = realIdx;
-    }
+    var tr = document.createElement("tr");
+    if (p.name === focusName) tr.className = "selected";
     tr.setAttribute("data-idx", String(realIdx));
-    tr.onclick = makeSelectHandler(realIdx);
-    tr.ondblclick = makeConnectHandler(realIdx);
+
+    var tdCheck = document.createElement("td");
+    tdCheck.className = "check";
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!g_checked[p.name];
+    cb.onclick = makeCheckHandler(p.name, cb);
+    tdCheck.appendChild(cb);
 
     var tdName = document.createElement("td");
     tdName.innerText = p.name;
     var tdNotes = document.createElement("td");
     tdNotes.innerText = p.notes;
+
+    tr.onclick = makeRowClickHandler(realIdx, p.name);
+    tr.ondblclick = makeConnectHandler(realIdx, p.name);
+
+    tr.appendChild(tdCheck);
     tr.appendChild(tdName);
     tr.appendChild(tdNotes);
     tbody.appendChild(tr);
   }
+
+  updateSelectAllState();
 }
 
 function indexOfPc(name) {
@@ -329,20 +440,83 @@ function indexOfPc(name) {
   return -1;
 }
 
-function makeSelectHandler(idx) {
-  return function () { selectPc(idx); };
+function makeCheckHandler(name, cb) {
+  return function (e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    g_checked[name] = !!cb.checked;
+    if (!cb.checked) delete g_checked[name];
+    updateSelectAllState();
+  };
 }
 
-function makeConnectHandler(idx) {
-  return function () {
-    selectPc(idx);
+function makeRowClickHandler(idx, name) {
+  return function (e) {
+    var t = e ? e.srcElement || e.target : null;
+    if (t && t.tagName && t.tagName.toLowerCase() === "input") return;
+    g_focusIdx = idx;
+    renderTable();
+  };
+}
+
+function makeConnectHandler(idx, name) {
+  return function (e) {
+    var t = e ? e.srcElement || e.target : null;
+    if (t && t.tagName && t.tagName.toLowerCase() === "input") return;
+    g_focusIdx = idx;
+    g_checked = {};
+    g_checked[name] = true;
+    renderTable();
     connect();
   };
 }
 
-function selectPc(idx) {
-  g_selected = idx;
+function updateSelectAllState() {
+  var list = filteredPcs();
+  var all = list.length > 0;
+  for (var i = 0; i < list.length; i++) {
+    if (!g_checked[list[i].name]) {
+      all = false;
+      break;
+    }
+  }
+  var hdr = document.getElementById("chkAll");
+  if (hdr) hdr.checked = all;
+}
+
+function toggleSelectAll() {
+  var hdr = document.getElementById("chkAll");
+  var list = filteredPcs();
+  var on = hdr && hdr.checked;
+  for (var i = 0; i < list.length; i++) {
+    if (on) g_checked[list[i].name] = true;
+    else delete g_checked[list[i].name];
+  }
   renderTable();
+}
+
+function selectAllFiltered() {
+  var list = filteredPcs();
+  for (var i = 0; i < list.length; i++) {
+    g_checked[list[i].name] = true;
+  }
+  renderTable();
+}
+
+function clearSelection() {
+  g_checked = {};
+  g_focusIdx = -1;
+  renderTable();
+}
+
+function getTargetPcs() {
+  var names = [];
+  for (var i = 0; i < g_pcs.length; i++) {
+    if (g_checked[g_pcs[i].name]) names.push(g_pcs[i].name);
+  }
+  if (names.length === 0 && g_focusIdx >= 0 && g_focusIdx < g_pcs.length) {
+    names.push(g_pcs[g_focusIdx].name);
+  }
+  return names;
 }
 
 function onSearch() {
@@ -351,15 +525,34 @@ function onSearch() {
 
 function reloadList() {
   loadConfig();
+  loadTemplates();
   loadPcs();
+  renderTemplates();
   renderTable();
+  updatePreview();
 }
 
 function quoteArg(s) {
-  if (s.indexOf(" ") >= 0 || s.indexOf("\"") >= 0) {
+  s = String(s);
+  if (s.indexOf(" ") >= 0 || s.indexOf("\"") >= 0 || s.indexOf("&") >= 0) {
     return "\"" + s.replace(/\"/g, "\\\"") + "\"";
   }
   return s;
+}
+
+function escapeForPsSingleQuoted(s) {
+  return String(s).replace(/'/g, "''");
+}
+
+function buildRemotePayload(shell, templateCmd) {
+  if (!templateCmd) {
+    return (shell === "powershell") ? "powershell" : "cmd";
+  }
+  if (shell === "powershell") {
+    return "powershell -NoProfile -ExecutionPolicy Bypass -Command \"" +
+      templateCmd.replace(/\\/g, "\\\\").replace(/\"/g, "\\\"") + "\"";
+  }
+  return "cmd /c " + quoteArg(templateCmd);
 }
 
 function buildCommand(pcName) {
@@ -368,7 +561,8 @@ function buildCommand(pcName) {
   }
 
   var shell = document.getElementById("shellType").value;
-  var remoteCmd = (shell === "powershell") ? "powershell" : "cmd";
+  var t = getSelectedTemplate();
+  var remote = buildRemotePayload(shell, t.command);
 
   var parts = [];
   parts.push(quoteArg(g_config.path));
@@ -387,42 +581,73 @@ function buildCommand(pcName) {
   if (document.getElementById("flagI").checked) parts.push("-i");
   if (document.getElementById("flagH").checked) parts.push("-h");
 
-  parts.push(remoteCmd);
+  parts.push(remote);
   return parts.join(" ");
 }
 
-function connect() {
-  if (g_selected < 0 || g_selected >= g_pcs.length) {
-    log("Select a PC first.", "err");
-    return;
-  }
-
-  var pc = g_pcs[g_selected];
-  var cmd;
-  try {
-    cmd = buildCommand(pc.name);
-  } catch (e) {
-    log(String(e.message || e), "err");
-    return;
-  }
-
-  // Log without exposing password value
-  var safeCmd = cmd;
+function redactCmd(cmd) {
+  var safe = cmd;
   if (g_config.password) {
-    safeCmd = safeCmd.replace(quoteArg(g_config.password), "********");
-    safeCmd = safeCmd.split(g_config.password).join("********");
+    safe = safe.split(quoteArg(g_config.password)).join("********");
+    safe = safe.split(g_config.password).join("********");
   }
-  log("Connecting to " + pc.name + " ...", "ok");
-  log(safeCmd, "cmd");
+  return safe;
+}
 
-  try {
-    var sh = new ActiveXObject("WScript.Shell");
-    // 1 = normal window, false = do not wait
-    sh.Run(cmd, 1, false);
-    log("Launched PsExec for " + pc.name, "ok");
-  } catch (e) {
-    log("Failed to launch: " + (e.message || e), "err");
+function connect() {
+  var targets = getTargetPcs();
+  if (targets.length === 0) {
+    log("Select at least one PC (checkbox or row).", "err");
+    return;
   }
+
+  var t = getSelectedTemplate();
+  if (targets.length > 1) {
+    var msg = "Run \"" + t.name + "\" on " + targets.length + " PC(s)?\n\n" + targets.join("\n");
+    if (!confirm(msg)) {
+      log("Batch cancelled.", "err");
+      return;
+    }
+  }
+
+  var wait = document.getElementById("flagWait").checked;
+  var sh;
+  try {
+    sh = new ActiveXObject("WScript.Shell");
+  } catch (e) {
+    log("Failed to create WScript.Shell: " + (e.message || e), "err");
+    return;
+  }
+
+  log("Template: " + t.name + " | Targets: " + targets.length + (wait ? " (wait)" : " (parallel)"), "ok");
+
+  var ok = 0;
+  var fail = 0;
+  for (var i = 0; i < targets.length; i++) {
+    var pc = targets[i];
+    var cmd;
+    try {
+      cmd = buildCommand(pc);
+    } catch (e) {
+      log(pc + ": " + (e.message || e), "err");
+      fail++;
+      continue;
+    }
+
+    log("[" + (i + 1) + "/" + targets.length + "] " + pc, "ok");
+    log(redactCmd(cmd), "cmd");
+
+    try {
+      sh.Run(cmd, 1, wait);
+      ok++;
+      log("Launched: " + pc, "ok");
+    } catch (e) {
+      fail++;
+      log("Failed " + pc + ": " + (e.message || e), "err");
+    }
+  }
+
+  log("Done. Launched " + ok + "/" + targets.length + (fail ? (" (" + fail + " failed)") : ""), fail ? "err" : "ok");
 }
 
 function log(msg, cls) {
@@ -449,16 +674,22 @@ function log(msg, cls) {
     <div class="toolbar">
       <div class="group">
         <label for="shellType">Shell</label>
-        <select id="shellType">
+        <select id="shellType" onchange="updatePreview()">
+          <option value="powershell" selected>PowerShell</option>
           <option value="cmd">CMD</option>
-          <option value="powershell">PowerShell</option>
         </select>
+      </div>
+
+      <div class="group">
+        <label for="templateSelect">Template</label>
+        <select id="templateSelect" onchange="updatePreview()"></select>
       </div>
 
       <div class="group flags">
         <label><input type="checkbox" id="flagS"> -s</label>
         <label><input type="checkbox" id="flagI" checked> -i</label>
         <label><input type="checkbox" id="flagH"> -h</label>
+        <label><input type="checkbox" id="flagWait"> Wait</label>
       </div>
 
       <div class="group">
@@ -468,15 +699,20 @@ function log(msg, cls) {
 
       <span class="spacer"></span>
 
+      <button class="secondary" onclick="selectAllFiltered()">Select all</button>
+      <button class="secondary" onclick="clearSelection()">Clear</button>
       <button class="secondary" onclick="reloadList()">Reload</button>
       <button class="connect" onclick="connect()">Connect</button>
     </div>
+
+    <div id="preview">Remote: interactive PowerShell</div>
 
     <div id="tableWrap">
       <table>
         <thead>
           <tr>
-            <th style="width:40%">Name</th>
+            <th class="check"><input type="checkbox" id="chkAll" onclick="toggleSelectAll()" title="Select all filtered"></th>
+            <th style="width:38%">Name</th>
             <th>Notes</th>
           </tr>
         </thead>
