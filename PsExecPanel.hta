@@ -1,0 +1,490 @@
+<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta charset="utf-8">
+<title>PsExec Panel</title>
+<HTA:APPLICATION
+  ID="PsExecPanel"
+  APPLICATIONNAME="PsExec Panel"
+  BORDER="thick"
+  BORDERSTYLE="normal"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+  SINGLEINSTANCE="yes"
+  SYSMENU="yes"
+  SCROLL="no"
+  WINDOWSTATE="normal"
+/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    font-family: "Segoe UI", Tahoma, sans-serif;
+    font-size: 13px;
+    color: #e6e6e6;
+    background: #1e1e1e;
+    overflow: hidden;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 12px;
+    gap: 10px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #333;
+    padding-bottom: 8px;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+  }
+  #configPath {
+    font-size: 11px;
+    color: #888;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    background: #252526;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 10px;
+  }
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .group label { color: #aaa; white-space: nowrap; }
+  select, input[type="text"] {
+    background: #1e1e1e;
+    color: #e6e6e6;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  select { min-width: 110px; }
+  #searchBox { width: 160px; }
+  .flags label {
+    color: #ccc;
+    margin-right: 4px;
+    cursor: pointer;
+  }
+  button {
+    background: #0e639c;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { background: #1177bb; }
+  button.secondary {
+    background: #3c3c3c;
+  }
+  button.secondary:hover { background: #4a4a4a; }
+  button.connect {
+    background: #16825d;
+    font-weight: 600;
+  }
+  button.connect:hover { background: #1a9d70; }
+  .spacer { flex: 1; }
+  #tableWrap {
+    flex: 1;
+    overflow: auto;
+    border: 1px solid #333;
+    border-radius: 6px;
+    background: #252526;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    background: #2d2d30;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid #444;
+    color: #ccc;
+    font-weight: 600;
+  }
+  tbody td {
+    padding: 7px 12px;
+    border-bottom: 1px solid #2a2a2a;
+    cursor: pointer;
+  }
+  tbody tr:hover { background: #2a2d2e; }
+  tbody tr.selected { background: #094771; }
+  tbody tr.selected:hover { background: #0a5a8a; }
+  #log {
+    height: 72px;
+    overflow: auto;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    color: #9cdcfe;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #log .err { color: #f48771; }
+  #log .ok { color: #4ec9b0; }
+  #log .cmd { color: #ce9178; }
+</style>
+<script language="JScript">
+var g_baseDir = "";
+var g_pcs = [];
+var g_selected = -1;
+var g_config = { path: "", username: "", password: "" };
+
+function onLoad() {
+  try {
+    window.resizeTo(820, 560);
+    window.moveTo(
+      Math.max(0, (screen.availWidth - 820) / 2),
+      Math.max(0, (screen.availHeight - 560) / 2)
+    );
+  } catch (e) {}
+
+  g_baseDir = getBaseDir();
+  document.getElementById("configPath").innerText = g_baseDir;
+  loadConfig();
+  loadPcs();
+  renderTable();
+  log("Ready. Config: " + g_baseDir + "config.ini", "ok");
+}
+
+function getBaseDir() {
+  var path = unescape(location.pathname);
+  // HTA paths often look like /C:/folder/file.hta
+  if (path.charAt(0) === "/") path = path.substring(1);
+  path = path.replace(/\//g, "\\");
+  var i = path.lastIndexOf("\\");
+  if (i >= 0) return path.substring(0, i + 1);
+  return "";
+}
+
+function loadConfig() {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var cfgPath = g_baseDir + "config.ini";
+  g_config = { path: "", username: "", password: "" };
+
+  if (!fso.FileExists(cfgPath)) {
+    log("config.ini not found: " + cfgPath, "err");
+    return;
+  }
+
+  var ts = fso.OpenTextFile(cfgPath, 1);
+  var content = ts.ReadAll();
+  ts.Close();
+
+  var lines = content.split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var line = trim(lines[i]);
+    if (!line || line.charAt(0) === ";" || line.charAt(0) === "#" || line.charAt(0) === "[") continue;
+    var eq = line.indexOf("=");
+    if (eq < 0) continue;
+    var key = trim(line.substring(0, eq)).toLowerCase();
+    var val = trim(line.substring(eq + 1));
+    if (key === "path") g_config.path = val;
+    else if (key === "username") g_config.username = val;
+    else if (key === "password") g_config.password = val;
+  }
+
+  if (!g_config.path) {
+    log("PsExec Path is empty in config.ini", "err");
+  } else {
+    log("PsExec path: " + g_config.path, "ok");
+  }
+}
+
+function loadPcs() {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var csvPath = g_baseDir + "pcs.csv";
+  g_pcs = [];
+  g_selected = -1;
+
+  if (!fso.FileExists(csvPath)) {
+    log("pcs.csv not found: " + csvPath, "err");
+    return;
+  }
+
+  var ts = fso.OpenTextFile(csvPath, 1);
+  var first = true;
+  while (!ts.AtEndOfStream) {
+    var line = ts.ReadLine();
+    if (first) {
+      first = false;
+      continue; // header
+    }
+    line = trim(line);
+    if (!line) continue;
+    var parts = parseCsvLine(line);
+    var name = trim(parts[0] || "");
+    var notes = trim(parts[1] || "");
+    if (name) g_pcs.push({ name: name, notes: notes });
+  }
+  ts.Close();
+  log("Loaded " + g_pcs.length + " PC(s) from pcs.csv", "ok");
+}
+
+function parseCsvLine(line) {
+  var result = [];
+  var cur = "";
+  var inQuotes = false;
+  for (var i = 0; i < line.length; i++) {
+    var c = line.charAt(i);
+    if (inQuotes) {
+      if (c === "\"") {
+        if (i + 1 < line.length && line.charAt(i + 1) === "\"") {
+          cur += "\"";
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += c;
+      }
+    } else {
+      if (c === "\"") inQuotes = true;
+      else if (c === ",") {
+        result.push(cur);
+        cur = "";
+      } else {
+        cur += c;
+      }
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+function trim(s) {
+  return String(s).replace(/^\s+|\s+$/g, "");
+}
+
+function getFilter() {
+  return trim(document.getElementById("searchBox").value).toLowerCase();
+}
+
+function filteredPcs() {
+  var q = getFilter();
+  if (!q) return g_pcs;
+  var out = [];
+  for (var i = 0; i < g_pcs.length; i++) {
+    var p = g_pcs[i];
+    if (p.name.toLowerCase().indexOf(q) >= 0 || p.notes.toLowerCase().indexOf(q) >= 0) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+function renderTable() {
+  var tbody = document.getElementById("pcBody");
+  tbody.innerHTML = "";
+  var list = filteredPcs();
+  var selName = (g_selected >= 0 && g_selected < g_pcs.length) ? g_pcs[g_selected].name : "";
+
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    var tr = document.createElement("tr");
+    var realIdx = indexOfPc(p.name);
+    if (p.name === selName) {
+      tr.className = "selected";
+      g_selected = realIdx;
+    }
+    tr.setAttribute("data-idx", String(realIdx));
+    tr.onclick = makeSelectHandler(realIdx);
+    tr.ondblclick = makeConnectHandler(realIdx);
+
+    var tdName = document.createElement("td");
+    tdName.innerText = p.name;
+    var tdNotes = document.createElement("td");
+    tdNotes.innerText = p.notes;
+    tr.appendChild(tdName);
+    tr.appendChild(tdNotes);
+    tbody.appendChild(tr);
+  }
+}
+
+function indexOfPc(name) {
+  for (var i = 0; i < g_pcs.length; i++) {
+    if (g_pcs[i].name === name) return i;
+  }
+  return -1;
+}
+
+function makeSelectHandler(idx) {
+  return function () { selectPc(idx); };
+}
+
+function makeConnectHandler(idx) {
+  return function () {
+    selectPc(idx);
+    connect();
+  };
+}
+
+function selectPc(idx) {
+  g_selected = idx;
+  renderTable();
+}
+
+function onSearch() {
+  renderTable();
+}
+
+function reloadList() {
+  loadConfig();
+  loadPcs();
+  renderTable();
+}
+
+function quoteArg(s) {
+  if (s.indexOf(" ") >= 0 || s.indexOf("\"") >= 0) {
+    return "\"" + s.replace(/\"/g, "\\\"") + "\"";
+  }
+  return s;
+}
+
+function buildCommand(pcName) {
+  if (!g_config.path) {
+    throw new Error("PsExec path not set in config.ini");
+  }
+
+  var shell = document.getElementById("shellType").value;
+  var remoteCmd = (shell === "powershell") ? "powershell" : "cmd";
+
+  var parts = [];
+  parts.push(quoteArg(g_config.path));
+  parts.push("\\\\" + pcName);
+
+  if (g_config.username) {
+    parts.push("-u");
+    parts.push(quoteArg(g_config.username));
+    if (g_config.password) {
+      parts.push("-p");
+      parts.push(quoteArg(g_config.password));
+    }
+  }
+
+  if (document.getElementById("flagS").checked) parts.push("-s");
+  if (document.getElementById("flagI").checked) parts.push("-i");
+  if (document.getElementById("flagH").checked) parts.push("-h");
+
+  parts.push(remoteCmd);
+  return parts.join(" ");
+}
+
+function connect() {
+  if (g_selected < 0 || g_selected >= g_pcs.length) {
+    log("Select a PC first.", "err");
+    return;
+  }
+
+  var pc = g_pcs[g_selected];
+  var cmd;
+  try {
+    cmd = buildCommand(pc.name);
+  } catch (e) {
+    log(String(e.message || e), "err");
+    return;
+  }
+
+  // Log without exposing password value
+  var safeCmd = cmd;
+  if (g_config.password) {
+    safeCmd = safeCmd.replace(quoteArg(g_config.password), "********");
+    safeCmd = safeCmd.split(g_config.password).join("********");
+  }
+  log("Connecting to " + pc.name + " ...", "ok");
+  log(safeCmd, "cmd");
+
+  try {
+    var sh = new ActiveXObject("WScript.Shell");
+    // 1 = normal window, false = do not wait
+    sh.Run(cmd, 1, false);
+    log("Launched PsExec for " + pc.name, "ok");
+  } catch (e) {
+    log("Failed to launch: " + (e.message || e), "err");
+  }
+}
+
+function log(msg, cls) {
+  var el = document.getElementById("log");
+  var line = document.createElement("div");
+  if (cls) line.className = cls;
+  var t = new Date();
+  var hh = ("0" + t.getHours()).slice(-2);
+  var mm = ("0" + t.getMinutes()).slice(-2);
+  var ss = ("0" + t.getSeconds()).slice(-2);
+  line.innerText = "[" + hh + ":" + mm + ":" + ss + "] " + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+</script>
+</head>
+<body onload="onLoad()">
+  <div id="app">
+    <header>
+      <h1>PsExec Fast Connect</h1>
+      <span id="configPath"></span>
+    </header>
+
+    <div class="toolbar">
+      <div class="group">
+        <label for="shellType">Shell</label>
+        <select id="shellType">
+          <option value="cmd">CMD</option>
+          <option value="powershell">PowerShell</option>
+        </select>
+      </div>
+
+      <div class="group flags">
+        <label><input type="checkbox" id="flagS"> -s</label>
+        <label><input type="checkbox" id="flagI" checked> -i</label>
+        <label><input type="checkbox" id="flagH"> -h</label>
+      </div>
+
+      <div class="group">
+        <label for="searchBox">Search</label>
+        <input type="text" id="searchBox" onkeyup="onSearch()" placeholder="Name or notes...">
+      </div>
+
+      <span class="spacer"></span>
+
+      <button class="secondary" onclick="reloadList()">Reload</button>
+      <button class="connect" onclick="connect()">Connect</button>
+    </div>
+
+    <div id="tableWrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:40%">Name</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="pcBody"></tbody>
+      </table>
+    </div>
+
+    <div id="log"></div>
+  </div>
+</body>
+</html>
