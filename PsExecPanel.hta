@@ -594,6 +594,73 @@ function redactCmd(cmd) {
   return safe;
 }
 
+function pad2(n) {
+  return ("0" + n).slice(-2);
+}
+
+function formatDateTimeStamp(d) {
+  return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + "_" +
+    pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
+}
+
+function sanitizeFileName(s) {
+  return String(s).replace(/[\\\/:\*\?"<>\|]/g, "_");
+}
+
+function ensureLogDir() {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var dir = g_baseDir + "Log";
+  if (!fso.FolderExists(dir)) {
+    fso.CreateFolder(dir);
+  }
+  return dir + "\\";
+}
+
+function makeLogPath(pcName) {
+  return ensureLogDir() + sanitizeFileName(pcName) + "_" + formatDateTimeStamp(new Date()) + ".log";
+}
+
+function writeTextFile(path, content, append) {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var ts = fso.OpenTextFile(path, append ? 8 : 2, true);
+  ts.Write(content);
+  ts.Close();
+}
+
+function writeLogHeader(logPath, pc, templateName, redactedCmd) {
+  var t = new Date();
+  var lines = [
+    "=== PsExec Panel Log ===",
+    "Time: " + t.toString(),
+    "Host: " + pc,
+    "Template: " + templateName,
+    "Command: " + redactedCmd,
+    "========================",
+    ""
+  ];
+  writeTextFile(logPath, lines.join("\r\n"), false);
+}
+
+function createLaunchBatch(psexecCmd, logPath, pauseAfter) {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var tempDir = fso.GetSpecialFolder(2).Path;
+  var batchPath = tempDir + "\\PsExecPanel_" + formatDateTimeStamp(new Date()) + "_" +
+    Math.floor(Math.random() * 100000) + ".cmd";
+  var cmdLine = String(psexecCmd).replace(/%/g, "%%");
+  var lines = [
+    "@echo off",
+    cmdLine + " >> " + quoteArg(logPath) + " 2>&1"
+  ];
+  if (pauseAfter) {
+    lines.push("echo.");
+    lines.push("type " + quoteArg(logPath));
+    lines.push("echo.");
+    lines.push("pause");
+  }
+  writeTextFile(batchPath, lines.join("\r\n") + "\r\n", false);
+  return batchPath;
+}
+
 function connect() {
   var targets = getTargetPcs();
   if (targets.length === 0) {
@@ -611,11 +678,19 @@ function connect() {
   }
 
   var wait = document.getElementById("flagWait").checked;
+  var hasTemplateCmd = !!(t.command && String(t.command).length);
   var sh;
   try {
     sh = new ActiveXObject("WScript.Shell");
   } catch (e) {
     log("Failed to create WScript.Shell: " + (e.message || e), "err");
+    return;
+  }
+
+  try {
+    ensureLogDir();
+  } catch (e) {
+    log("Failed to create Log folder: " + (e.message || e), "err");
     return;
   }
 
@@ -634,13 +709,31 @@ function connect() {
       continue;
     }
 
+    var redacted = redactCmd(cmd);
     log("[" + (i + 1) + "/" + targets.length + "] " + pc, "ok");
-    log(redactCmd(cmd), "cmd");
+    log(redacted, "cmd");
+
+    var logPath;
+    var launchCmd = cmd;
+    try {
+      logPath = makeLogPath(pc);
+      writeLogHeader(logPath, pc, t.name, redacted);
+      if (hasTemplateCmd) {
+        launchCmd = quoteArg(createLaunchBatch(cmd, logPath, true));
+      } else {
+        writeTextFile(logPath, "Interactive session launched (console output not captured).\r\n", true);
+      }
+    } catch (e) {
+      log(pc + " log setup failed: " + (e.message || e), "err");
+      fail++;
+      continue;
+    }
 
     try {
-      sh.Run(cmd, 1, wait);
+      sh.Run(launchCmd, 1, wait);
       ok++;
       log("Launched: " + pc, "ok");
+      log("Log: " + logPath, "ok");
     } catch (e) {
       fail++;
       log("Failed " + pc + ": " + (e.message || e), "err");
